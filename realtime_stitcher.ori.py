@@ -7,9 +7,6 @@ import shutil
 import subprocess
 from datetime import datetime
 from queue import Queue
-from surround_view.stitcher_module import BirdViewStitcher
-# 导入 glob 模块
-import glob
 
 # =============== 全局变量声明 ===============
 running = True
@@ -33,7 +30,7 @@ SAVE_BASE_DIR = r"E:\zhiwei\1\zhiwei-adas360\surround-view-system-introduction\c
 MAX_AUTO_CAPTURES = 200              
 MAX_CAPTURE_DURATION = 3600          
 # 设置自动抓拍间隔为 10 秒
-AUTO_CAPTURE_INTERVAL = 2         
+AUTO_CAPTURE_INTERVAL = 10          
 MIN_DISK_SPACE = 1024                # 最小保留磁盘空间(MB)
 
 # 相机名称映射
@@ -75,7 +72,7 @@ class ImageSaver(threading.Thread):
                 self.queue.task_done()
             except:
                 pass
-
+                
     def add_task(self, camera_id, frame, filename):
         """添加保存任务到队列"""
         if self.queue.full():
@@ -169,7 +166,6 @@ class CameraThread(threading.Thread):
                             # 更新状态信息
                             duration = current_time - self.auto_capture_start_time
                             remaining = MAX_CAPTURE_DURATION - duration if MAX_CAPTURE_DURATION > 0 else float('inf')
-
                             last_capture_status = (
                                 f"抓拍中: {self.auto_capture_count}/{MAX_AUTO_CAPTURES if MAX_AUTO_CAPTURES > 0 else '∞'}张 | "
                                 f"剩余时间: {max(0, int(remaining))}秒"
@@ -226,7 +222,7 @@ class CameraThread(threading.Thread):
         frame = self.current_frame if self.current_frame is not None else self.last_valid_frame
 
         self.image_saver.add_task(self.camera_id + 1, frame, filename)
-
+    
     def _initialize_capture(self):
         """初始化视频捕获"""
         print(f"🔌🔌 正在连接相机 {self.camera_id + 1}: {self.url}")
@@ -379,50 +375,6 @@ def main():
         camera_threads.append(thread)
         thread.start()
 
-    # 定义 camera_info 变量
-    camera_info = {
-        "front": os.path.join(SAVE_BASE_DIR, "camera_1"),
-        "back": os.path.join(SAVE_BASE_DIR, "camera_2"),
-        "left": os.path.join(SAVE_BASE_DIR, "camera_3"),
-        "right": os.path.join(SAVE_BASE_DIR, "camera_4")
-    }
-
-    # 等待相机线程保存初始图像
-    max_wait_time = 10  # 最大等待时间（秒）
-    wait_start_time = time.time()
-    all_images_found = False
-
-    while time.time() - wait_start_time < max_wait_time and not all_images_found:
-        all_images_found = True
-        for cam in ["front", "back", "left", "right"]:
-            files = sorted(glob.glob(os.path.join(camera_info[cam], "*.png")))
-            if not files:
-                all_images_found = False
-                break
-        if not all_images_found:
-            time.sleep(1)
-
-    if not all_images_found:
-        print("⚠️ 等待超时，部分相机未保存初始图像，尝试手动保存一次")
-        save_all_cameras(camera_threads)
-        time.sleep(2)  # 等待保存完成
-
-    # 初始化 BirdViewStitcher
-    init_images = []
-    for cam in ["front", "back", "left", "right"]:
-        files = sorted(glob.glob(os.path.join(camera_info[cam], "*.png")))
-        if not files:
-            print(f"❌ 初始化失败，找不到 {cam} 的图像，跳过此相机初始化")
-            init_images.append(np.zeros((480, 640, 3), dtype=np.uint8))  # 使用空白图像替代
-            continue
-        init_img = cv2.imread(files[0])
-        if init_img is None:
-            print(f"❌ 初始化失败，{cam} 的第一张图读取失败：{files[0]}，跳过此相机初始化")
-            init_images.append(np.zeros((480, 640, 3), dtype=np.uint8))  # 使用空白图像替代
-            continue
-        init_images.append(init_img)
-    stitcher = BirdViewStitcher(init_images=init_images)
-
     try:
         # 等待所有相机初始化
         time.sleep(1)
@@ -447,11 +399,38 @@ def main():
             for thread in camera_threads:
                 frames.append(thread.get_current_frame())
             
-            # 生成鸟瞰图
-            if len(frames) == 4:
-                birdview_image = stitcher.stitch_frames(*frames)
-                if birdview_image is not None:
-                    cv2.imshow("Bird's Eye View", cv2.resize(birdview_image, (600, 800)))
+            # 创建显示画面
+            if show_stitched:
+                display_frame = create_stitched_image(frames, camera_threads)
+                if display_frame is not None:
+                    cv2.imshow("四路监控系统 - 拼接模式", display_frame)
+            else:
+                if frames and frames[0] is not None:
+                    grid_height = frames[0].shape[0] // 8
+                    grid_width = frames[0].shape[1] // 8
+                else:
+                    grid_height, grid_width = 480, 640
+                
+                grid_size = (grid_height * 2, grid_width * 2, 3)
+                display_frame = np.zeros(grid_size, dtype=np.uint8)
+                
+                positions = [
+                    (0, 0), (0, grid_width),
+                    (grid_height, 0), (grid_height, grid_width)
+                ]
+                
+                for i, frame in enumerate(frames):
+                    if frame is not None:
+                        resized = cv2.resize(frame, (grid_width, grid_height))
+                    else:
+                        resized = np.zeros((grid_height, grid_width, 3), dtype=np.uint8)
+                        cv2.putText(resized, f"Cam {i+1} Offline", 
+                                   (10, grid_height//2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    
+                    y, x = positions[i]
+                    display_frame[y:y+grid_height, x:x+grid_width] = resized
+                
+                cv2.imshow("四路监控系统 - 分屏模式", display_frame)
             
             # 处理键盘输入
             key = cv2.waitKey(1)
@@ -471,7 +450,7 @@ def main():
                     cv2.destroyWindow("四路监控系统 - 拼接模式")
                     print("🖥🖥🖥️ 切换到分屏显示模式")
             elif key == ord('f') or key == ord('F'):  # 全屏切换
-                window_name = "Bird's Eye View"
+                window_name = "四路监控系统 - 拼接模式" if show_stitched else "四路监控系统 - 分屏模式"
                 fullscreen = cv2.getWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN)
                 cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, 
                                      not fullscreen)
